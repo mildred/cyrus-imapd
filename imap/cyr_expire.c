@@ -790,59 +790,37 @@ static int jnotif_cb(const mbentry_t *mbentry, void *vrock)
                 mbentry->name, error_message(r));
         goto done;
     }
-    unsigned long nrecords = mbox->i.num_records;
-
-    // Get current time for reporting.
-    struct timespec start = {0};
-    if (clock_gettime(CLOCK_MONOTONIC, &start) < 0) {
-        xsyslog(LOG_ERR, "can not get current time", NULL);
-        goto done;
-    }
-    struct timespec until = {0};
-
-    // Initialize message iterator.
-    struct mailbox_iter *iter = mailbox_iter_init(mbox, 0, ITER_SKIP_EXPUNGED);
-    if (rock->ctx->args.lock_seconds > 1) {
-        until = start;
-        until.tv_sec += rock->ctx->args.lock_seconds / 2;
-        mailbox_iter_timer(iter, until, 1000);
-    }
 
     // Expunge notifications.
-    time_t expunge_mark = 0;
+    struct mailbox_iter *iter = mailbox_iter_init(mbox, 0, ITER_SKIP_EXPUNGED);
+    unsigned long nexpunged = 0;
     message_t *msg;
     while ((msg = (message_t *)mailbox_iter_step(iter))) {
-        struct index_record record = *msg_record(msg);
-        if (record.internaldate < rock->before) {
-            record.internal_flags |= FLAG_INTERNAL_EXPUNGED;
-            mailbox_rewrite_index_record(mbox, &record);
-            expunge_mark = record.last_updated;
+        const struct index_record *record = msg_record(msg);
+        if (verbose >= 3) {
+            verbosep("%s: examining uid %d (internaldate=%lld before=%lld)",
+                    mbentry->name, record->uid,
+                    (long long) record->internaldate,
+                    (long long) rock->before);
+        }
+        if (record->internaldate < rock->before) {
+            struct index_record new_record = *record;
+            new_record.internal_flags |= FLAG_INTERNAL_EXPUNGED;
+            int r2 = mailbox_rewrite_index_record(mbox, &new_record);
+            if (r2) {
+                fprintf(stderr, "%s: failed to set uid %d as expunged: %s\n",
+                        mbentry->name, record->uid, error_message(r2));
+                continue;
+            }
+            if (verbose >= 2)
+                verbosep("%s: set uid %d as expunged", mbentry->name, record->uid);
+            nexpunged++;
         }
     }
     mailbox_iter_done(&iter);
-    if (!expunge_mark) goto done;
 
-    // Cleanup expunged notifications.
-    unsigned ndeleted = 0;
-    iter = mailbox_iter_init(mbox, 0, 0);
-    if (rock->ctx->args.lock_seconds > 1) {
-        until.tv_sec += rock->ctx->args.lock_seconds / 2;
-        mailbox_iter_timer(iter, until, 1000);
-    }
-    r = mailbox_expunge_cleanup(mbox, iter, expunge_mark, &ndeleted);
-    mailbox_iter_done(&iter);
-    if (r) {
-        xsyslog(LOG_ERR, "mailbox expunge cleanup failed",
-                "mboxname=<%s> err=<%s>", mbentry->name, error_message(r));
-        goto done;
-    }
-
-    // Report outcome.
-    struct timespec end = {0};
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    verbosep("Deleted %u of %lu JMAP notifications from %s (%lld seconds)\n",
-             ndeleted, nrecords, mbentry->name,
-             (long long)(end.tv_sec - start.tv_sec));
+    verbosep("%s: set %lu JMAP notification(s) as expunged",
+            mbentry->name, nexpunged);
 
 done:
     mailbox_close(&mbox);
