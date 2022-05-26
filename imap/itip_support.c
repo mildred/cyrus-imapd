@@ -1016,6 +1016,12 @@ HIDDEN enum sched_deliver_outcome sched_deliver_local(const char *userid,
     syslog(LOG_DEBUG, "sched_deliver_local(%s, %s, %X)",
            sender, recipient, sparam->flags);
 
+    if (!strcmp(sender, recipient)) {
+        /* Ignore iTIP sent from and to the same address */
+        result = SCHED_DELIVER_NOACTION;
+        goto done;
+    }
+
     if (icalp) *icalp = NULL;
     if (attendeep) *attendeep = NULL;
 
